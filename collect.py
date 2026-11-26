@@ -1,0 +1,58 @@
+import json, urllib.request, urllib.parse, xml.etree.ElementTree as ET
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from email.utils import parsedate_to_datetime
+
+CACHE=Path('site/data.json')
+JST=timezone(timedelta(hours=9))
+LAT,LON=35.7105,139.7746
+def now(): return datetime.now(JST).isoformat()
+def fetch(url, params=None, post=None):
+    if params: url+='?'+urllib.parse.urlencode(params)
+    req=urllib.request.Request(url,data=post,headers={'User-Agent':'UenoDailyDashboard/1.0'})
+    with urllib.request.urlopen(req,timeout=45) as f: return f.read(8*1024*1024)
+def weather():
+    p=dict(latitude=LAT,longitude=LON,timezone='Asia/Tokyo',forecast_days=2,current='temperature_2m,weather_code',hourly='temperature_2m,precipitation_probability,weather_code',daily='temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code')
+    return json.loads(fetch('https://api.open-meteo.com/v1/forecast',p))
+def food():
+    q='[out:json][timeout:25];nwr["amenity"~"^(restaurant|cafe|fast_food|food_court)$"]["name"](35.702,139.768,35.718,139.780);out center;'
+    raw=json.loads(fetch('https://overpass-api.de/api/interpreter',post=urllib.parse.urlencode({'data':q}).encode()))
+    out=[]; seen=set()
+    for e in raw['elements']:
+        t=e.get('tags',{})
+        if 'name' not in t or 'amenity' not in t: continue
+        n=t.get('name:ja') or t['name']; loc=e.get('center',e); lat=loc.get('lat'); lon=loc.get('lon')
+        if lat is None or lon is None or (n,round(lat,4),round(lon,4)) in seen: continue
+        seen.add((n,round(lat,4),round(lon,4)))
+        out.append(dict(name=n,cuisine=t.get('cuisine',''),category=t['amenity'],hours=t.get('opening_hours',''),lat=lat,lon=lon,url=f'https://www.openstreetmap.org/{e["type"]}/{e["id"]}'))
+    out.sort(key=lambda x: (x['lat']-LAT)**2+(x['lon']-LON)**2*.66)
+    return out
+def news(local=False):
+    p={'hl':'ja','gl':'JP','ceid':'JP:ja'}
+    url='https://news.google.com/rss'
+    if local: url+='/search';p['q']='(上野 OR 御徒町 OR 台東区) when:7d'
+    root=ET.fromstring(fetch(url,p));out=[]
+    for i in root.findall('./channel/item')[:30]:
+        title=i.findtext('title',''); link=i.findtext('link',''); source=i.findtext('source',''); date=i.findtext('pubDate','')
+        if not link.startswith('https://'):continue
+        try: date=parsedate_to_datetime(date).astimezone(JST).isoformat()
+        except (ValueError,TypeError): pass
+        if source and title.endswith(' - '+source):title=title[:-len(source)-3]
+        out.append(dict(title=title,url=link,source=source,published=date))
+    return out
+SOURCES={'weather':weather,'food':food,'news':news,'local':lambda:news(True)}
+try: state=json.loads(CACHE.read_text(encoding='utf-8'))
+except (OSError,ValueError): state={}
+with ThreadPoolExecutor(max_workers=4) as pool:
+    jobs={key:pool.submit(fn) for key,fn in SOURCES.items()}
+    for key,job in jobs.items():
+        try:
+            state[key]={'data':job.result(),'updated':now(),'error':None}
+            print(key,'OK')
+        except Exception as e:
+            state[key]={**state.get(key,{}),'error':str(e),'attempted':now()}
+            print(key,'ERROR',str(e))
+state['last_attempt']=now()
+CACHE.parent.mkdir(parents=True,exist_ok=True)
+temp=CACHE.with_suffix('.tmp');temp.write_text(json.dumps(state,ensure_ascii=False),encoding='utf-8');temp.replace(CACHE)
