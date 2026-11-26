@@ -38,10 +38,10 @@ def food():
         out.append(dict(name=n,cuisine=t.get('cuisine',''),category=t['amenity'],hours=t.get('opening_hours',''),lat=lat,lon=lon,url=f'https://www.openstreetmap.org/{e["type"]}/{e["id"]}'))
     out.sort(key=lambda x: (x['lat']-LAT)**2+(x['lon']-LON)**2*.66)
     return out
-def news(local=False):
+def news(local=False, query=None):
     p={'hl':'ja','gl':'JP','ceid':'JP:ja'}
     url='https://news.google.com/rss'
-    if local: url+='/search';p['q']='(上野 OR 御徒町 OR 台東区) when:7d'
+    if local or query: url+='/search';p['q']=query or '(上野 OR 御徒町 OR 台東区) when:7d'
     root=ET.fromstring(fetch(url,p));out=[]
     for i in root.findall('./channel/item')[:30]:
         title=i.findtext('title',''); link=i.findtext('link',''); source=i.findtext('source',''); date=i.findtext('pubDate','')
@@ -51,10 +51,29 @@ def news(local=False):
         if source and title.endswith(' - '+source):title=title[:-len(source)-3]
         out.append(dict(title=title,url=link,source=source,published=date))
     return out
-SOURCES={'weather':weather,'food':food,'news':news,'local':lambda:news(True)}
+def kev():
+    errors=[]
+    for endpoint in ('https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json','https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json'):
+        try:
+            entries=json.loads(fetch(endpoint))['vulnerabilities']
+            if not isinstance(entries,list) or not entries: raise ValueError('Empty KEV catalog')
+            return [dict(title=v['cveID']+' | '+v['vendorProject']+' '+v['product'],source='CISA KEV / 悪用確認済み',published=v['dateAdded'],url='https://www.cisa.gov/known-exploited-vulnerabilities-catalog',detail=v.get('requiredAction',''),ransomware=v.get('knownRansomwareCampaignUse','Unknown')) for v in sorted(entries,key=lambda v:v['dateAdded'],reverse=True)[:20]]
+        except Exception as exc:
+            errors.append(str(exc))
+    raise RuntimeError('; '.join(errors))
+def jpcert():
+    root=ET.fromstring(fetch('https://www.jpcert.or.jp/rss/jpcert.rdf'))
+    out=[]
+    for e in root.findall('.//{*}item'):
+        title=e.findtext('{*}title',''); url=e.findtext('{*}link','')
+        if title and url.startswith('https://'):
+            out.append(dict(title=title,url=url,source='JPCERT/CC',published=e.findtext('{http://purl.org/dc/elements/1.1/}date','')))
+    if not out: raise ValueError('Empty JPCERT feed')
+    return out[:25]
+SOURCES={'weather':weather,'food':food,'news':news,'local':lambda:news(True),'kev':kev,'jpcert':jpcert,'incident':lambda:news(query='(情報漏洩 OR 情報漏えい OR 不正アクセス OR ランサムウェア) when:7d'),'itnews':lambda:news(query='(Microsoft 365 OR AWS OR Oracle OR MySQL OR Tableau) (障害 OR 脆弱性 OR サポート終了 OR 仕様変更 OR 値上げ) when:7d')}
 try: state=json.loads(CACHE.read_text(encoding='utf-8'))
 except (OSError,ValueError): state={}
-with ThreadPoolExecutor(max_workers=4) as pool:
+with ThreadPoolExecutor(max_workers=8) as pool:
     jobs={key:pool.submit(fn) for key,fn in SOURCES.items()}
     for key,job in jobs.items():
         try:
