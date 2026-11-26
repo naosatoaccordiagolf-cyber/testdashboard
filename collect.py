@@ -17,7 +17,17 @@ def weather():
     return json.loads(fetch('https://api.open-meteo.com/v1/forecast',p))
 def food():
     q='[out:json][timeout:25];nwr["amenity"~"^(restaurant|cafe|fast_food|food_court)$"]["name"](35.702,139.768,35.718,139.780);out center;'
-    raw=json.loads(fetch('https://overpass-api.de/api/interpreter',post=urllib.parse.urlencode({'data':q}).encode()))
+    errors=[]
+    for endpoint in ('https://overpass-api.de/api/interpreter','https://overpass.private.coffee/api/interpreter'):
+        try:
+            raw=json.loads(fetch(endpoint,params={'data':q}))
+            if not isinstance(raw.get('elements'),list) or raw.get('remark'):
+                raise ValueError(raw.get('remark','Invalid Overpass response'))
+            break
+        except Exception as exc:
+            errors.append(str(exc))
+    else:
+        raise RuntimeError('Overpass unavailable: '+'; '.join(errors))
     out=[]; seen=set()
     for e in raw['elements']:
         t=e.get('tags',{})
